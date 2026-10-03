@@ -1,4 +1,5 @@
 import numpy as np
+from activation import ReLu, Softmax
 
 #-----------------------------------------------------------------------------------------------------------------------
 class Layer ():
@@ -22,11 +23,10 @@ class Layer ():
         pass
 
 #-----------------------------------------------------------------------------------------------------------------------
-from scipy import signal
 class Convolutional(Layer):
     """Apply valid 2-D cross-correlation across multi-channel inputs."""
 
-    def __init__(self, input_shape, kernel_size, layer_size):
+    def __init__(self, input_shape, kernel_size, layer_size, activation = ReLu):
         """Initialize a convolutional layer for the supplied tensor dimensions.
 
         Args:
@@ -35,41 +35,70 @@ class Convolutional(Layer):
             layer_size: Number of kernels in the layer.
         """
         super().__init__()
-
-        input_channels, input_height, input_width = input_shape
-        self.depth = layer_size
+        self.beta = 0.85
+        self.t = 0
         self.input_shape = input_shape
-        self.input_channels = input_channels
-        self.output_shape = (self.depth, input_height - kernel_size + 1, input_width - kernel_size + 1) #for a valid conv with no padding
-        self.kernels_shape = (self.depth, input_channels, kernel_size, kernel_size)
-        self.kernels = np.random.randn(*self.kernels_shape)
-        self.biases = self.biases = np.random.randn(self.depth, 1, 1)
+        self.depth = layer_size
+        self.input_channels, self.input_height, self.input_width = input_shape #(3, 28, 28)
+
+        self.output_shape = (self.depth, self.input_height - kernel_size + 1, self.input_width - kernel_size + 1) #for a valid conv with no padding
+        self.layer_shape = (self.depth, self.input_channels, kernel_size, kernel_size) #(5, 3, 3, 3)
+
+        fan_in = self.layer_shape[1] * self.layer_shape[2] * self.layer_shape[3]
+        self.kernels = (np.random.randn(*self.layer_shape) * np.sqrt(2.0 / fan_in)).astype(np.float32)
+        self.biases = np.zeros((self.depth, 1, 1), np.float32) #(1 bias per 3 channels-kernel)
+
+        self.kernels_velocity = np.zeros(self.layer_shape, dtype=np.float32)
+        self.biases_velocity = np.zeros((self.depth, 1, 1), dtype=np.float32)
+        self.kernels_gradient = np.zeros_like(self.kernels)
+        self.biases_gradient = np.zeros_like(self.biases)
+
+        self.activation = activation()
 
     def forward(self, input):
-        """Convolve ``input`` with the layer kernels and return the output."""
-        self.input = input
-        self.output = np.zeros(self.output_shape)
-
-        for i in range(self.depth):
-            for j in range(self.input_channels):
-                self.output[i] += signal.correlate2d(self.input[j], self.kernels[i, j], "valid")
-
+        """Convolve ``input`` with vectorized sliding windows."""
+        self.input = np.asarray(input, dtype=np.float32)
+        windows = np.lib.stride_tricks.sliding_window_view(
+            self.input, (self.layer_shape[2], self.layer_shape[3]), axis=(1, 2)
+        )
+        self.output = np.einsum("cxyij,ocij->oxy", windows, self.kernels, optimize=True)
         self.output += self.biases
-        return self.output
+        return self.activation.forward(self.output)
     
-    def backward(self, output_gradient, learning_rate):
-        """Propagate gradients and update kernels and biases in place."""
-        kernels_gradient = np.zeros(self.kernels_shape)
-        input_gradient = np.zeros(self.input_shape)
+    def zero_grad(self):
+        self.kernels_gradient.fill(0.0)
+        self.biases_gradient.fill(0.0)
 
-        for i  in range(self.depth):
-            for j in range(self.input_channels):
-                kernels_gradient[i, j] = signal.correlate2d(self.input[j], output_gradient[i], "valid")
-                input_gradient[j] += signal.convolve2d(output_gradient[i], self.kernels[i,j], "full")
+    def backward(self, output_gradient, learning_rate=None):
+        """Accumulate gradients and optionally update for compatibility."""
+        grad = np.asarray(output_gradient, dtype=np.float32) * self.activation.backward(self.output)
+        windows = np.lib.stride_tricks.sliding_window_view(
+            self.input, (self.layer_shape[2], self.layer_shape[3]), axis=(1, 2)
+        )
+        kernels_gradient = np.einsum("cxyij,oxy->ocij", windows, grad, optimize=True)
+        input_gradient = np.zeros_like(self.input, dtype=np.float32)
 
-        bias_gradient = np.sum(output_gradient, axis=(1, 2), keepdims=True)
-        self.biases -= learning_rate * bias_gradient
+        for kernel_row in range(self.layer_shape[2]):
+            for kernel_col in range(self.layer_shape[3]):
+                input_gradient[:, kernel_row:kernel_row + self.output_shape[1], kernel_col:kernel_col + self.output_shape[2]] += np.einsum(
+                    "oxy,oc->cxy", grad, self.kernels[:, :, kernel_row, kernel_col], optimize=True
+                )
+
+        self.kernels_gradient += kernels_gradient
+        self.biases_gradient += np.sum(grad, axis=(1, 2), keepdims=True, dtype=np.float32)
+        if learning_rate is not None:
+            self.update_parameters(learning_rate, 1)
         return input_gradient
+
+    def update_parameters(self, learning_rate, batch_size):
+        scale = np.float32(1.0 / batch_size)
+        self.kernels_velocity = self.beta * self.kernels_velocity + (1 - self.beta) * self.kernels_gradient * scale
+        self.biases_velocity = self.beta * self.biases_velocity + (1 - self.beta) * self.biases_gradient * scale
+        self.t += 1
+        correction = np.float32(1.0 - self.beta ** self.t)
+        self.kernels -= np.float32(learning_rate) * self.kernels_velocity / correction
+        self.biases -= np.float32(learning_rate) * self.biases_velocity / correction
+        self.zero_grad()
 
 #-----------------------------------------------------------------------------------------------------------------------
 class Reshape(Layer):
@@ -100,7 +129,10 @@ class Flatten(Layer):
 
     def backward(self, output_gradient, learning_rate=None):
         """Reshape the output gradient back to the input tensor shape."""
-        return np.reshape(output_gradient, self.input_shape)
+        grad = np.reshape(output_gradient, self.input_shape)
+        #print(f"input shape: {self.input_shape}")
+        #print(f"flatten layer output grad shape: {grad.shape}")
+        return grad
 
 #-----------------------------------------------------------------------------------------------------------------------
 
@@ -123,60 +155,166 @@ class MaxPoolingLayer(Layer):
 class Dense(Layer):
     """Fully connected layer that applies a linear transformation."""
 
-    def __init__(self, input_shape, output_size):
-        """Initialize the layer's weights and biases."""
+    def __init__(self, input_shape, output_size, activation):
+        """Initialize the layer's weights and biases.
+            
+        Args:
+            input_shape: The shape of the data recieved from the previous layer
+            output_shape: The expected output shape
+            activation: Activation function to use at the end of the layer
+            y_true: For cases when Softmax is used for activation.
+        """
         super().__init__()
+        self.beta = 0.8 #for momentum gradient descent optimization
         self.input_shape = input_shape
         self.output_size = output_size
-        self.weights = np.random.randn(output_size, input_shape[0])
-        self.biases = np.random.randn(output_size, 1)
+        self.weights_velocity = np.zeros((output_size, input_shape[0]), np.float32)
+        self.weights = (np.random.randn(output_size, input_shape[0]) * np.sqrt(2.0 / input_shape[0])).astype(np.float32)
+
+        self.biases_velocity = np.zeros((output_size, 1), np.float32)
+        self.biases = np.zeros((output_size, 1), np.float32)
+        self.weights_gradient = np.zeros_like(self.weights)
+        self.biases_gradient = np.zeros_like(self.biases)
+
+        self.activation = activation()
 
     def forward(self, input):
         """Compute the linear transformation of ``input``."""
-        self.input = input
+        #print(f"Dense layer input shape: {input.shape}")
+        self.input = np.asarray(input, dtype=np.float32)
         self.output = np.dot(self.weights, self.input) + self.biases
-        return self.output
+        #print(f"Dense layer output: {self.output}")
+        return self.activation.forward(self.output)
 
-    def backward(self, output_gradient, learning_rate):
-        """Propagate gradients and update weights and biases in place."""
+    def zero_grad(self):
+        self.weights_gradient.fill(0.0)
+        self.biases_gradient.fill(0.0)
+
+    def backward(self, output_gradient, y_true=None, learning_rate=None):
+        """Accumulate gradients and optionally update for compatibility."""
+        if isinstance(self.activation, Softmax):
+            output_gradient = self.activation.backward(self.output, y_true)
+        else:
+            output_gradient = np.asarray(output_gradient, dtype=np.float32) * self.activation.backward(self.output)
+
+        output_gradient = np.asarray(output_gradient, dtype=np.float32).reshape(-1, 1)
         weights_gradient = np.dot(output_gradient, self.input.T)
         input_gradient = np.dot(self.weights.T, output_gradient)
-
-        # Update weights and biases
-        self.weights += learning_rate * weights_gradient
-        self.biases += learning_rate * output_gradient
-
+        self.weights_gradient += weights_gradient
+        self.biases_gradient += output_gradient
+        if learning_rate is not None:
+            self.update_parameters(learning_rate, 1)
         return input_gradient
 
-# print("DENSE LAYER TEST: BASIC SHAPE VERIFICATION")
-# print("=" * 70)
+    def update_parameters(self, learning_rate, batch_size):
+        scale = np.float32(1.0 / batch_size)
+        self.weights_velocity = self.beta * self.weights_velocity + (1 - self.beta) * self.weights_gradient * scale
+        self.biases_velocity = self.beta * self.biases_velocity + (1 - self.beta) * self.biases_gradient * scale
+        self.weights -= np.float32(learning_rate) * self.weights_velocity
+        self.biases -= np.float32(learning_rate) * self.biases_velocity
+        self.zero_grad()
 
-# dense = Dense((64,1), 29)
+class Dropout(Layer):
+    def __init__(self):
+        super().__init__()
 
-# # Create random input
-# input_data = np.random.randn(64, 1)
-# print(f"\nInput shape: {input_data.shape}")
+    def forward(self, input):
+        return input
 
-# # Forward pass
-# output = dense.forward(input_data)
-# print (output[0])
-# print(f"Output shape: {output.shape}")  # (29, 1)
+    def backward(self, gradient, learning_rate=None):
+        return gradient
 
-# # Simulate gradient for backward pass
-# output_gradient = np.random.randn(29, 1)
-# print(f"Output gradient shape: {output_gradient.shape}")
 
-# # Backward pass
-# input_gradient = dense.backward(output_gradient, learning_rate=0.01)
+# ---- Test script ----
+def check_conv_weights_update():
+    np.random.seed(42)
 
-# print(f"\nGradient shapes:")
-# print(f"  weights_gradient: {dense.weights.shape}")  # (29, 64)
-# print(f"  biases_gradient: {dense.biases.shape}")    # (29, 1)
-# print(f"  input_gradient: {input_gradient.shape}")   # (64, 1)
+    # Small input: 3 channels, 8x8 image
+    input_shape = (3, 8, 8)
+    kernel_size = 3
+    layer_size = 5
+    learning_rate = 0.05
 
-# # Verify shapes match
-# assert dense.weights.shape == (29, 64), "Weights shape wrong!"
-# assert dense.biases.shape == (29, 1), "Biases shape wrong!"
-# assert input_gradient.shape == (64, 1), "Input gradient shape wrong!"
+    layer = Convolutional(input_shape, kernel_size, layer_size)
+
+    # Snapshot weights before
+    kernels_before = layer.kernels.copy()
+    biases_before = layer.biases.copy()
+
+    # Random input
+    x = np.random.randn(*input_shape)
+
+    # Forward
+    y = layer.forward(x)
+    print(f"Forward output shape: {y.shape} (expected {layer.output_shape})")
+    assert y.shape == layer.output_shape, "Output shape mismatch!"
+
+    # Fake upstream gradient (same shape as output)
+    output_gradient = np.random.randn(*layer.output_shape)
+
+    # Backward
+    input_gradient = layer.backward(output_gradient, learning_rate)
+
+    # Snapshot weights after
+    kernels_after = layer.kernels.copy()
+    biases_after = layer.biases.copy()
+
+    # ---- Checks ----
+    print("\n=== Weight update checks ===")
+    print(f"Kernels changed:  {not np.allclose(kernels_before, kernels_after)}")
+    print(f"Biases changed:   {not np.allclose(biases_before, biases_after)}")
+
+    print(f"Max |Δkernel|:    {np.max(np.abs(kernels_after - kernels_before)):.6e}")
+    print(f"Max |Δbias|:      {np.max(np.abs(biases_after - biases_before)):.6e}")
+
+    # Sanity: input gradient shape
+    print(f"\nInput gradient shape: {input_gradient.shape} (expected {input_shape})")
+    assert input_gradient.shape == input_shape, "Input gradient shape mismatch!"
+
+    # ---- Directional check: update should reduce loss ----
+    print("\n=== Directional check (loss should decrease) ===")
+
+    # Use a simple MSE-like loss w.r.t. a random target
+    target = np.random.randn(*layer.output_shape)
+
+    def loss_of(layer_obj, x_in, tgt):
+        out = layer_obj.forward(x_in)
+        return 0.5 * np.sum((out - tgt) ** 2)
+
+    layer2 = Convolutional(input_shape, kernel_size, layer_size)
+    layer2.kernels = kernels_before.copy()
+    layer2.biases = biases_before.copy()
+
+    loss_before = loss_of(layer2, x, target)
+
+    # Gradient of MSE w.r.t. output = (out - target)
+    out_before = layer2.forward(x)
+    dloss = (out_before - target)
+
+    layer2.backward(dloss, learning_rate)
+
+    loss_after = loss_of(layer2, x, target)
+
+    print(f"Loss before step: {loss_before:.6f}")
+    print(f"Loss after step:  {loss_after:.6f}")
+    print(f"Loss decreased:   {loss_after < loss_before}")
+
+    # ---- Multiple-step check ----
+    print("\n=== Multi-step training check ===")
+    layer3 = Convolutional(input_shape, kernel_size, layer_size)
+    init_norm = np.linalg.norm(layer3.kernels)
+
+    losses = []
+    for step in range(200):
+        out = layer3.forward(x)
+        dloss = (out - target)
+        layer3.backward(dloss, learning_rate)
+        losses.append(0.5 * np.sum((out - target) ** 2))
+
+    print(f"Initial loss: {losses[0]:.6f}")
+    print(f"Final loss:   {losses[-1]:.6f}")
+    print(f"Kernel norm changed: {init_norm:.6f} -> {np.linalg.norm(layer3.kernels):.6f}")
+    print(f"Loss decreased over training: {losses[-1] < losses[0]}")
+
 
 
