@@ -1,0 +1,11 @@
+numpy
+mediapipe == 1.0.1
+opencv-python
+torch
+torchvision
+pandas
+scikit-learn
+tensorflow
+ultralytics
+fastapi
+uvicorn
