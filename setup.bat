@@ -33,4 +33,10 @@ echo.
 echo Virtual environment setup complete!
 echo To activate the virtual environment manually, run: .venv\Scripts\activate.bat
 echo To deactivate, run: deactivate
-pause
+
+echo Starting the FastAPI server at http://127.0.0.1:8000 ...
+.venv\Scripts\python.exe -m uvicorn backend.main:app --reload
+if errorlevel 1 (
+    echo Uvicorn server exited with an error.
+    exit /b 1
+)
