@@ -9,3 +9,4 @@ tensorflow
 ultralytics
 fastapi
 uvicorn
+ultralytics
