@@ -34,8 +34,33 @@ echo Virtual environment setup complete!
 echo To activate the virtual environment manually, run: .venv\Scripts\activate.bat
 echo To deactivate, run: deactivate
 
+REM Start the frontend in a separate command window.
+if not exist "%~dp0frontend\SignAI\package.json" (
+    echo Frontend package file not found: frontend\SignAI\package.json
+    exit /b 1
+)
+where npm >nul 2>nul
+if errorlevel 1 (
+    echo npm was not found. Install Node.js and npm to start the frontend.
+    exit /b 1
+)
+
+pushd "%~dp0frontend\SignAI"
+if not exist node_modules\ (
+    echo Installing frontend dependencies...
+    call npm install
+    if errorlevel 1 (
+        echo Failed to install frontend dependencies.
+        popd
+        exit /b 1
+    )
+)
+echo Starting the SignAI frontend at http://127.0.0.1:5173 ...
+start "SignAI Frontend" cmd /k npm run dev
+popd
+
 echo Starting the FastAPI server at http://127.0.0.1:8000 ...
-.venv\Scripts\python.exe -m uvicorn backend.main:app --reload
+.venv\Scripts\python.exe -m uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000
 if errorlevel 1 (
     echo Uvicorn server exited with an error.
     exit /b 1

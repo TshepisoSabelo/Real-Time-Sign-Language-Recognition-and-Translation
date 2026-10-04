@@ -8,5 +8,5 @@ scikit-learn
 tensorflow
 ultralytics
 fastapi
-uvicorn
+uvicorn[standard]
 ultralytics

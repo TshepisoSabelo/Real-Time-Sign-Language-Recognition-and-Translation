@@ -90,16 +90,29 @@ The API and camera run as separate processes. Start the API first, then start th
 
 ### Windows
 
-Start the API (the setup script installs dependencies and then starts Uvicorn):
+Start the frontend and API with the setup script. The frontend opens in a separate command window, and the current window runs Uvicorn:
 
 ```bat
 setup.bat
 ```
 
-Or, if dependencies are already installed:
+If you want to run either service separately, use these commands from the project root. Start the API:
 
 ```bat
 .venv\Scripts\python.exe -m uvicorn backend.main:app --reload
+```
+
+The `uvicorn[standard]` requirement installs the WebSocket implementation required by `/ws`. If you already created the virtual environment before this requirement was added, install the updated requirements and restart Uvicorn:
+
+```bat
+.venv\Scripts\python.exe -m pip install -r requirements.txt
+```
+
+Start the frontend in another terminal (install its dependencies first with `npm install` if needed):
+
+```bat
+cd frontend\SignAI
+npm run dev
 ```
 
 In a second terminal, start the camera and point it to the API's prediction-ingestion route:
