@@ -7,3 +7,6 @@ pandas
 scikit-learn
 tensorflow
 ultralytics
+fastapi
+uvicorn
+ultralytics
