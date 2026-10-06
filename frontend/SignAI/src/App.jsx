@@ -11,18 +11,24 @@ import {
 const STATUS_LABELS = {
   ready: 'Ready',
   connecting: 'Connecting',
-  active: 'Connected',
-  stopped: 'Stopped',
+  active: 'Live',
+  stopped: 'Paused',
 };
 
 const RECONNECT_DELAY_MS = 1500;
 const NO_SIGN = 'None';
+const MAX_FRAME_RATE = 60;
+const FRAME_RATE = Math.min(
+  MAX_FRAME_RATE,
+  Math.max(1, Number(import.meta.env.VITE_FRAME_RATE) || MAX_FRAME_RATE),
+);
+const MAX_BUFFERED_BYTES = 256 * 1024;
 
 const websocketProtocol =
   window.location.protocol === 'https:' ? 'wss:' : 'ws:';
 const websocketUrl =
   import.meta.env.VITE_WS_URL ||
-  `${websocketProtocol}//${window.location.hostname}:8000/ws`;
+  `${websocketProtocol}//${window.location.hostname}:8000/ws/recognition`;
 
 function StatusIndicator({ status }) {
   return (
@@ -46,7 +52,7 @@ function Header({ status }) {
         </div>
         <div>
           <h1>SignAi</h1>
-          <p>Real-time sign language recognition and translation</p>
+          <p>Helping turn signs into words</p>
         </div>
       </div>
       <StatusIndicator status={status} />
@@ -54,7 +60,7 @@ function Header({ status }) {
   );
 }
 
-function CameraPreview({ active }) {
+function CameraPreview({ active, cameraReady, videoRef }) {
   return (
     <section className="card camera-card" aria-labelledby="camera-title">
       <div className="section-heading">
@@ -64,7 +70,7 @@ function CameraPreview({ active }) {
         </div>
         <span className={`live-badge ${active ? 'live-badge--active' : ''}`}>
           <span />
-          {active ? 'Recognition active' : 'Recognition idle'}
+          {active ? 'Watching your hands' : 'Waiting for camera'}
         </span>
       </div>
       <div className={`camera-stage ${active ? 'camera-stage--active' : ''}`}>
@@ -72,17 +78,27 @@ function CameraPreview({ active }) {
         <div className="corner corner--tr" />
         <div className="corner corner--bl" />
         <div className="corner corner--br" />
-        <div className="camera-placeholder">
-          <div className="camera-icon">
-            <Camera size={34} />
+        <video
+          ref={videoRef}
+          className={`camera-video ${cameraReady ? 'camera-video--visible' : ''}`}
+          autoPlay
+          playsInline
+          muted
+          style={{ transform: 'scaleX(-1)' }}
+        />
+        {!cameraReady && (
+          <div className="camera-placeholder">
+            <div className="camera-icon">
+              <Camera size={34} />
+            </div>
+            <strong>{active ? 'Your live stream is on' : 'Camera preview'}</strong>
+            <p>
+              {active
+                ? 'Your sign is being read in real time'
+                : 'Your camera feed will appear here'}
+            </p>
           </div>
-          <strong>{active ? 'Prediction stream connected' : 'Camera Preview'}</strong>
-          <p>
-            {active
-              ? 'Live predictions are arriving from the backend'
-              : 'Camera feed will appear here'}
-          </p>
-        </div>
+        )}
         {active && <ScanLine className="scan-icon" size={22} aria-hidden="true" />}
       </div>
     </section>
@@ -95,13 +111,13 @@ function DetectedSign({ letter }) {
       <div className="section-heading">
         <div>
           <span className="eyebrow">Latest result</span>
-          <h2 id="detected-title">Detected Sign</h2>
+          <h2 id="detected-title">Recognized sign</h2>
         </div>
       </div>
       <div className="detected-letter" aria-live="polite">
         {letter || '—'}
       </div>
-      <p className="muted">The latest recognized letter will appear here.</p>
+      <p className="muted">The latest sign the app has picked up will appear here.</p>
     </section>
   );
 }
@@ -115,7 +131,7 @@ function TranslationPanel({ translation }) {
       <div className="section-heading">
         <div>
           <span className="eyebrow">Recognition output</span>
-          <h2 id="translation-title">Translation</h2>
+          <h2 id="translation-title">Your text</h2>
         </div>
         <span className="character-count">{translation.length} characters</span>
       </div>
@@ -125,7 +141,7 @@ function TranslationPanel({ translation }) {
         }`}
         aria-live="polite"
       >
-        {translation || 'Recognized letters will appear here...'}
+        {translation || 'Your translated words will appear here...'}
       </div>
     </section>
   );
@@ -148,7 +164,7 @@ function RecognitionControls({
         disabled={isActive || isConnecting}
       >
         <Play size={18} fill="currentColor" />
-        Start Recognition
+        Start live recognition
       </button>
       <button
         className="button button--secondary"
@@ -156,11 +172,11 @@ function RecognitionControls({
         disabled={!isActive && !isConnecting}
       >
         <CircleStop size={18} />
-        Stop Recognition
+        Pause
       </button>
       <button className="button button--ghost" onClick={onClear}>
         <RotateCcw size={18} />
-        Clear Translation
+        Clear text
       </button>
     </section>
   );
@@ -182,17 +198,24 @@ function isPredictionMessage(value) {
 export default function App() {
   const [status, setStatus] = useState('ready');
   const [connectionMessage, setConnectionMessage] = useState(
-    'Start recognition after the API and camera processes are running.',
+    'Your camera preview is ready. Start live recognition whenever you are.',
   );
   const [detectedLetter, setDetectedLetter] = useState('');
   const [translation, setTranslation] = useState('');
+  const [cameraReady, setCameraReady] = useState(false);
+  const [cameraError, setCameraError] = useState('');
 
   const socketRef = useRef(null);
   const reconnectTimerRef = useRef(null);
   const shouldReconnectRef = useRef(false);
   const lastAppendedLetterRef = useRef(null);
+  const videoRef = useRef(null);
+  const canvasRef = useRef(null);
+  const frameTimerRef = useRef(null);
+  const frameInFlightRef = useRef(false);
 
   function handlePrediction(message) {
+    frameInFlightRef.current = false;
     let prediction;
 
     try {
@@ -200,6 +223,20 @@ export default function App() {
     } catch (error) {
       console.error('The API sent invalid JSON over the WebSocket.', error);
       setConnectionMessage('The API sent invalid prediction data.');
+      return;
+    }
+
+    if (
+      prediction !== null &&
+      typeof prediction === 'object' &&
+      (prediction.type === 'error' || prediction.status === 'error')
+    ) {
+      console.error('The recognition backend reported an error.', prediction);
+      setConnectionMessage(
+        typeof prediction.message === 'string'
+          ? prediction.message
+          : 'The backend could not process a camera frame.',
+      );
       return;
     }
 
@@ -215,7 +252,9 @@ export default function App() {
       return;
     }
 
-    setDetectedLetter(prediction.letter);
+    setDetectedLetter((currentLetter) =>
+      currentLetter === prediction.letter ? currentLetter : prediction.letter,
+    );
 
     // Only add a letter when it changes
     if (prediction.letter !== lastAppendedLetterRef.current) {
@@ -230,7 +269,7 @@ export default function App() {
     }
 
     setStatus('connecting');
-    setConnectionMessage('Connecting to the live prediction stream...');
+    setConnectionMessage('Connecting to your live sign stream...');
 
     let socket;
 
@@ -238,7 +277,7 @@ export default function App() {
       socket = new WebSocket(websocketUrl);
     } catch (error) {
       console.error('Could not create the prediction WebSocket.', error);
-      setConnectionMessage('Could not connect. Retrying...');
+      setConnectionMessage('Connection is taking a moment. Trying again...');
       reconnectTimerRef.current = window.setTimeout(
         connectToWebSocket,
         RECONNECT_DELAY_MS,
@@ -254,7 +293,7 @@ export default function App() {
       }
 
       setStatus('active');
-      setConnectionMessage('Receiving live predictions from the camera.');
+      setConnectionMessage('Your camera is live and ready to read signs.');
     };
 
     socket.onmessage = (event) => {
@@ -273,22 +312,30 @@ export default function App() {
       }
 
       socketRef.current = null;
+      frameInFlightRef.current = false;
 
       if (shouldReconnectRef.current) {
         setStatus('connecting');
-        setConnectionMessage('Connection lost. Reconnecting...');
+        setConnectionMessage('Connection dropped. Reconnecting to your stream...');
         reconnectTimerRef.current = window.setTimeout(
           connectToWebSocket,
           RECONNECT_DELAY_MS,
         );
       } else {
         setStatus('stopped');
-        setConnectionMessage('The prediction stream is stopped.');
+        setConnectionMessage('The live stream is paused.');
       }
     };
   }
 
   function startRecognition() {
+    if (!cameraReady) {
+      setConnectionMessage(
+        cameraError || 'Allow camera access before starting live recognition.',
+      );
+      return;
+    }
+
     if (socketRef.current) {
       return;
     }
@@ -301,6 +348,9 @@ export default function App() {
     shouldReconnectRef.current = false;
     window.clearTimeout(reconnectTimerRef.current);
     reconnectTimerRef.current = null;
+    window.clearInterval(frameTimerRef.current);
+    frameTimerRef.current = null;
+    frameInFlightRef.current = false;
 
     const socket = socketRef.current;
     socketRef.current = null;
@@ -309,7 +359,7 @@ export default function App() {
     }
 
     setStatus('stopped');
-    setConnectionMessage('The prediction stream is stopped.');
+    setConnectionMessage('The live stream is paused.');
   }
 
   function clearTranslation() {
@@ -318,12 +368,174 @@ export default function App() {
   }
 
   useEffect(() => {
+    let stream;
+    let isMounted = true;
+
+    async function startCameraFeed() {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        setCameraError('This browser does not support webcam access.');
+        console.error('This browser does not support webcam access.');
+        return;
+      }
+
+      let cameraStream;
+      try {
+        cameraStream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: 'user' },
+          audio: false,
+        });
+
+        if (!isMounted) {
+          cameraStream.getTracks().forEach((track) => track.stop());
+          return;
+        }
+
+        stream = cameraStream;
+        canvasRef.current = document.createElement('canvas');
+        const video = videoRef.current;
+        if (!video) {
+          throw new Error('The camera preview element is unavailable.');
+        }
+
+        video.srcObject = cameraStream;
+        await video.play();
+        setCameraError('');
+        setCameraReady(true);
+
+        cameraStream.getVideoTracks().forEach((track) => {
+          track.addEventListener('ended', () => {
+            if (!isMounted) {
+              return;
+            }
+            setCameraReady(false);
+            setCameraError('The camera disconnected. Check it and reload the app.');
+            stopRecognition();
+          });
+        });
+      } catch (error) {
+        if (!isMounted) {
+          cameraStream?.getTracks().forEach((track) => track.stop());
+          return;
+        }
+        cameraStream?.getTracks().forEach((track) => track.stop());
+        if (videoRef.current) {
+          videoRef.current.srcObject = null;
+        }
+        stream = null;
+        console.error('Could not start the live camera feed.', error);
+        setCameraError(
+          error instanceof Error && error.name === 'NotAllowedError'
+            ? 'Allow camera access in your browser to use live recognition.'
+            : 'Could not start the camera. Check that it is connected and available.',
+        );
+      }
+    }
+
+    startCameraFeed();
+
     return () => {
+      isMounted = false;
       shouldReconnectRef.current = false;
       window.clearTimeout(reconnectTimerRef.current);
-      socketRef.current?.close();
+      window.clearInterval(frameTimerRef.current);
+      frameTimerRef.current = null;
+      frameInFlightRef.current = false;
+
+      const socket = socketRef.current;
+      socketRef.current = null;
+      if (socket && socket.readyState < WebSocket.CLOSING) {
+        socket.close();
+      }
+
+      if (stream) {
+        stream.getTracks().forEach((track) => track.stop());
+      }
+
+      if (videoRef.current) {
+        videoRef.current.srcObject = null;
+      }
+      canvasRef.current = null;
     };
   }, []);
+
+  useEffect(() => {
+    if (status !== 'active' || !cameraReady) {
+      window.clearInterval(frameTimerRef.current);
+      frameTimerRef.current = null;
+      frameInFlightRef.current = false;
+      return undefined;
+    }
+
+    const canvas = canvasRef.current;
+    const context = canvas?.getContext('2d');
+    if (!canvas || !context) {
+      console.error('Could not create the reusable camera frame canvas.');
+      setConnectionMessage('Could not capture camera frames for recognition.');
+      return undefined;
+    }
+
+    frameTimerRef.current = window.setInterval(() => {
+      const video = videoRef.current;
+      const socket = socketRef.current;
+      if (
+        !video ||
+        video.readyState < HTMLMediaElement.HAVE_CURRENT_DATA ||
+        !video.videoWidth ||
+        !video.videoHeight ||
+        !socket ||
+        socket.readyState !== WebSocket.OPEN ||
+        !shouldReconnectRef.current ||
+        socket.bufferedAmount > MAX_BUFFERED_BYTES ||
+        frameInFlightRef.current
+      ) {
+        return;
+      }
+
+      const scale = Math.min(1, 640 / video.videoWidth);
+      const frameWidth = Math.round(video.videoWidth * scale);
+      const frameHeight = Math.round(video.videoHeight * scale);
+      if (canvas.width !== frameWidth || canvas.height !== frameHeight) {
+        canvas.width = frameWidth;
+        canvas.height = frameHeight;
+      }
+      try {
+        context.drawImage(video, 0, 0, canvas.width, canvas.height);
+        frameInFlightRef.current = true;
+
+        canvas.toBlob(
+          (blob) => {
+            if (
+              !blob ||
+              socketRef.current !== socket ||
+              socket.readyState !== WebSocket.OPEN ||
+              !shouldReconnectRef.current
+            ) {
+              frameInFlightRef.current = false;
+              return;
+            }
+
+            try {
+              socket.send(blob);
+            } catch (error) {
+              frameInFlightRef.current = false;
+              console.error('Could not send a camera frame to the backend.', error);
+            }
+          },
+          'image/jpeg',
+          0.75,
+        );
+      } catch (error) {
+        frameInFlightRef.current = false;
+        console.error('Could not capture a camera frame.', error);
+      }
+    }, 1000 / FRAME_RATE);
+
+    return () => {
+      window.clearInterval(frameTimerRef.current);
+      frameTimerRef.current = null;
+      frameInFlightRef.current = false;
+    };
+  }, [cameraReady, status]);
 
   return (
     <div className="app-shell">
@@ -332,17 +544,21 @@ export default function App() {
       <main>
         <div className="intro">
           <div>
-            <span className="eyebrow">Computer vision interface</span>
-            <h2>Translate hand signs into text.</h2>
+            <span className="eyebrow">Your sign assistant</span>
+            <h2>Turn hand signs into words.</h2>
             <p>
-              Position a hand sign inside the camera frame. Live recognition
-              results from the backend will appear here.
+              Hold your hand in front of the camera and let the app read it in
+              real time.
             </p>
           </div>
         </div>
 
         <div className="workspace">
-          <CameraPreview active={status === 'active'} />
+          <CameraPreview
+            active={status === 'active'}
+            cameraReady={cameraReady}
+            videoRef={videoRef}
+          />
           <DetectedSign letter={detectedLetter} />
         </div>
 
@@ -356,7 +572,7 @@ export default function App() {
         />
 
         <p className="integration-note" role="status" aria-live="polite">
-          {connectionMessage}
+          {cameraError || connectionMessage}
         </p>
       </main>
     </div>
