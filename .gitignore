@@ -54,3 +54,7 @@ Thumbs.db
 
 #dataset
 dataset/
+
+#frontend
+frontend/dist/
+frontend/node_modules/

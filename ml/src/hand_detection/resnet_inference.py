@@ -14,7 +14,9 @@ class ResNetSignLanguageClassifier:
 
     def __init__(self, checkpoint_path=None, device=None):
         source_root = Path(__file__).resolve().parents[1]
-        self.checkpoint_path = Path(checkpoint_path or source_root / "resnet_sign_language.pth")
+        self.checkpoint_path = Path(
+            checkpoint_path or source_root / "models" / "resnet_sign_language.pth"
+        )
         self.device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
 
         self.model = models.resnet18(weights=None)
@@ -29,7 +31,7 @@ class ResNetSignLanguageClassifier:
 
     @torch.inference_mode()
     def predict_bgr(self, image_bgr, top_k=3):
-        """Predict a BGR OpenCV crop using the training data preprocessing."""
+        """Predicts a BGR OpenCV crop using the training data preprocessing."""
         if image_bgr is None or image_bgr.size == 0:
             raise ValueError("Cannot classify an empty image crop")
 
@@ -39,7 +41,7 @@ class ResNetSignLanguageClassifier:
             interpolation=cv2.INTER_AREA,
         )
         image = image.astype(np.float32, copy=False) / np.float32(255.0)
-        image_chw = np.ascontiguousarray(image.transpose(2, 0, 1))
+        image_chw = np.ascontiguousarray(image.transpose(2, 0, 1)) #changing the image format to CHW (Channel, Height, Width) format
         return self.predict_chw(image_chw, top_k=top_k)
 
     @torch.inference_mode()
