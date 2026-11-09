@@ -74,19 +74,36 @@ pip freeze > requirements.txt
   - `losses.py`: Loss functions
   - `network.py`: Network architecture
 - **ml/src/hand_detection/**: Hand detection module
-  - `handsDetect.py`: Hand detection implementation
+  - `hands_detect.py`: Hand detection implementation
+  - `resnet-inference.py`: Contain a wrapper for
 - **ml/src/models/**: Pre-trained models
   - `hand_landmarker.task`: MediaPipe hand landmarker model
 - **backend/**: FastAPI prediction-ingestion endpoint and WebSocket stream
-- **frontend/**: Frontend UI (coming soon)
+- **frontend/**: Frontend React UI
+
+## Saving and using the custom CNN
+
+After training `model` in `ml/src/cnn/network.ipynb`, run the final notebook cell to save the complete trained network to `ml/src/cnn/sign_language_cnn_25_epochs.pkl`. The checkpoint includes the layer structure and learned parameters.
+
+Load it once and reuse it for predictions:
+
+```python
+from ml.src.cnn.inference import load_model, predict_image
+
+model = load_model()
+prediction = predict_image("path/to/hand-image.jpg", model=model)
+print(prediction)  # {"letter": "A", "confidence": 0.95}
+```
+
+`predict_image` and `predict_bgr` use the training input format: OpenCV BGR, resize to 64×64, scale to `[0, 1]`, then convert to CHW. Only load checkpoints created by this project: Python pickle files can execute code when loaded.
 
 ## Development
 
 All Python development should be done within the activated virtual environment. VS Code is configured to automatically use the virtual environment interpreter.
 
-## Running the API and camera
+## Running the API and camera preview
 
-The API and camera run as separate processes. Start the API first, then start the camera in a second terminal from the project root.
+The browser owns the webcam. Start the API and frontend, allow camera access in the browser, then select **Start live recognition** to send frames to the API.
 
 ### Windows
 
@@ -96,39 +113,14 @@ Start the frontend and API with the setup script. The frontend opens in a separa
 setup.bat
 ```
 
-If you want to run either service separately, use these commands from the project root. Start the API:
+The camera preview opens when the frontend loads. Recognition frames are JPEG binary messages sent to `/ws/recognition` websocket endpoint. The backend loads the YOLO detector and the CNN Classifier once on startup, then reuses the existing flip, hand-crop, and classifier preprocessing pipeline for each frame. Frames are captured at up to 60 attempts per second by default (`VITE_FRAME_RATE` can lower or raise the rate up to 60); the browser allows only one frame in flight and skips captures while waiting for a prediction, so actual inference frequency follows backend capacity.
 
-```bat
-.venv\Scripts\python.exe -m uvicorn backend.main:app --reload
-```
-
-The `uvicorn[standard]` requirement installs the WebSocket implementation required by `/ws`. If you already created the virtual environment before this requirement was added, install the updated requirements and restart Uvicorn:
-
-```bat
-.venv\Scripts\python.exe -m pip install -r requirements.txt
-```
-
-Start the frontend in another terminal (install its dependencies first with `npm install` if needed):
-
-```bat
-cd frontend\SignAI
-npm run dev
-```
-
-In a second terminal, start the camera and point it to the API's prediction-ingestion route:
-
-```bat
-.venv\Scripts\python.exe -m ml.src.hand_detection.hand_detect --api-url http://127.0.0.1:8000/prediction
-```
-
-Press `x` in the camera window to stop the camera process. Stop Uvicorn with `Ctrl+C`.
+Press **Pause** to stop sending frames and close the recognition WebSocket. Closing the page releases the browser camera.
 
 ### API data flow
 
-- The camera process posts JSON predictions to `POST /prediction`, for example `{"letter":"A","confidence":0.95}`. The API responds with `{"status":"ok"}`; `letter` must be non-empty and `confidence` must be between `0.0` and `1.0` (invalid input receives HTTP 422). When no hand is detected, the camera posts `{"letter":"None","confidence":0.0}`.
-- The API validates and stores the latest prediction in its own process.
-- Frontend clients connect to `ws://127.0.0.1:8000/ws`. The WebSocket sends the current prediction immediately and sends another message when the letter or confidence changes.
-- `POST /prediction` is an ingestion endpoint for the camera, not a frontend polling route. The camera publisher keeps at most one pending update and sends it on a background thread, so HTTP requests do not block camera frame capture. If the API is unavailable, the camera keeps running and logs a warning; it will send later updates when the API is reachable again.
+- Recognition frontend clients connect to `ws://127.0.0.1:8000/ws/recognition`; each JPEG frame receives a JSON response containing the sign label, confidence, and status (`success`, `no_hand`, or `error`).
+- `ws://127.0.0.1:8000/ws` remains available for clients consuming predictions posted to `POST /prediction`. That legacy endpoint validates and stores the latest prediction in the API process.
 - The ingestion route has no authentication and is intended for local development. Do not expose it to an untrusted network without adding authentication and other deployment protections.
 
 The interactive API documentation is available at `http://127.0.0.1:8000/docs`.

@@ -178,7 +178,21 @@ main {
 .camera-stage--active {
     background:#edf2f7
 }
+.camera-video {
+    position:absolute;
+    inset:0;
+    width:100%;
+    height:100%;
+    object-fit:cover;
+    display:none;
+    background:#0f172a
+}
+.camera-video--visible {
+    display:block
+}
 .camera-placeholder {
+    position:relative;
+    z-index:1;
     text-align:center;
     color:var(--text-beige)
 }
